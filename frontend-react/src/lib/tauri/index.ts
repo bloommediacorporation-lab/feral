@@ -317,6 +317,10 @@ export interface Settings {
   /** The chosen inference route: `"<provider>:<model>"` (cloud) or
    *  `"local:<file>"`. null = the bundled local default. */
   active_route: string | null;
+  /** Allow a failed cloud turn to be retried against a DIFFERENT configured
+   *  cloud provider. Off by default: it sends the conversation, and that
+   *  provider's key, to a recipient the person did not choose. */
+  cloud_fallback_enabled: boolean;
 }
 
 export interface ByokProvider {

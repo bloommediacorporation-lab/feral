@@ -77,6 +77,25 @@ pub struct Settings {
     /// silently reverted to the local CPU model on every gateway restart.
     #[serde(default)]
     pub active_route: Option<String>,
+    /// Allow a failed cloud turn to be retried against a DIFFERENT cloud
+    /// provider the user has configured. Off by default, and the default is the
+    /// point.
+    ///
+    /// This existed and was unconditional. On a machine with no local model a
+    /// single 429 ended the turn, so `pick_second_provider` picked the next
+    /// enabled provider alphabetically and sent the conversation there with
+    /// that provider's key. The reliability argument is real. The problem is
+    /// that `PROMISES.md` promise 3 says the conversation goes to the recipient
+    /// the person chose, the Privacy tab says "Cloud providers (BYOK) only
+    /// contacted when you explicitly send a message", and neither is true when
+    /// Anthropic's rate limit silently routes the transcript to OpenAI.
+    ///
+    /// A person who wants that trade can have it — it is their key and their
+    /// data — but they have to be the one who asks for it. Nobody discovers
+    /// this on a settings screen they never opened; they discover it in another
+    /// company's logs.
+    #[serde(default)]
+    pub cloud_fallback_enabled: bool,
 }
 
 fn default_rsi_budget() -> Option<f64> { Some(0.0) }
@@ -97,6 +116,7 @@ impl Default for Settings {
             dreams_enabled: false,
             security_acknowledged_at: None,
             active_route: None,
+            cloud_fallback_enabled: false,
         }
     }
 }
@@ -157,5 +177,20 @@ mod tests {
     fn default_rsi_budget_is_local_only_zero() {
         let s = Settings::default();
         assert_eq!(s.rsi_max_cost_usd, Some(0.0));
+    }
+
+    /// The default IS the product. A person who never opens Settings must not
+    /// have their conversation re-sent to a second company on a rate limit.
+    #[test]
+    fn cloud_fallback_is_off_until_the_person_asks_for_it() {
+        assert!(!Settings::default().cloud_fallback_enabled);
+        // And an older settings.json, written before the field existed, must
+        // load as off rather than failing to parse or defaulting to on.
+        let older = r#"{
+            "models_dir": "/tmp/m", "default_gpu_layers": -1,
+            "api_server_enabled": false, "api_port": 11435, "version": "1.0.0"
+        }"#;
+        let parsed: Settings = serde_json::from_str(older).expect("older file must still load");
+        assert!(!parsed.cloud_fallback_enabled);
     }
 }

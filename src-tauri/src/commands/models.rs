@@ -11,11 +11,20 @@ use tokio::sync::mpsc;
 
 /// Another configured provider to fail over to, or `None`.
 ///
-/// Picked rather than asked for, because the alternative is a settings screen
-/// for something with exactly one sensible answer: any enabled provider that
-/// is not the one already failing, with a key and a model. The user configured
-/// it, so they have consented to it being used; the only question was whether
-/// it gets used when it would help.
+/// **`None` unless `settings.cloud_fallback_enabled` is on, and it is off by
+/// default.** This used to be unconditional, on the reasoning that configuring
+/// a provider is consent to using it. That reasoning is wrong. Configuring
+/// OpenAI is consent to send OpenAI the messages you send while OpenAI is
+/// selected; it is not consent to send OpenAI a conversation you had with
+/// Anthropic because Anthropic returned 429. `PROMISES.md` promise 3 is about
+/// the recipient the person chose, and the Privacy tab told them cloud
+/// providers are "only contacted when you explicitly send a message" while
+/// this function could contact a second one they never picked. The failure is
+/// invisible from inside the app and visible in another company's logs.
+///
+/// The reliability problem it was written for is real: on a machine with no
+/// local model a single 429 ends the turn. That trade is now the person's to
+/// make, on the Privacy tab, with the cost spelled out.
 ///
 /// Deterministic order, so a turn that fails over twice lands on the same
 /// endpoint both times and a bug report is reproducible.
@@ -23,9 +32,13 @@ fn second_provider(primary: &str) -> Option<serde_json::Value> {
     let settings = cinderpaw_core::settings::load();
     let byok = cinderpaw_core::byok::load(&settings);
     let catalog = cinderpaw_core::byok::provider_catalog();
-    pick_second_provider(primary, &byok.providers, &catalog, &|id| {
-        cinderpaw_core::byok::byok_get(id)
-    })
+    pick_second_provider(
+        settings.cloud_fallback_enabled,
+        primary,
+        &byok.providers,
+        &catalog,
+        &|id| cinderpaw_core::byok::byok_get(id),
+    )
 }
 
 /// The choosing half, with the world passed in so it can be tested.
@@ -44,11 +57,20 @@ fn second_provider(primary: &str) -> Option<serde_json::Value> {
 ///     provider was never considered. A fallback that silently does not exist is
 ///     the failure this function was added to prevent.
 fn pick_second_provider(
+    // Off unless the person asked for it, and the gate lives HERE rather than
+    // at the caller so the whole decision - including "never" - is one tested
+    // function. Sending a conversation to a provider they did not pick is not
+    // a reliability feature we get to choose on their behalf; see
+    // `Settings::cloud_fallback_enabled` for the argument.
+    enabled: bool,
     primary: &str,
     providers: &std::collections::HashMap<String, cinderpaw_core::byok::ProviderConfig>,
     catalog: &[cinderpaw_core::byok::ProviderCatalogEntry],
     key_of: &dyn Fn(&str) -> Option<String>,
 ) -> Option<serde_json::Value> {
+    if !enabled {
+        return None;
+    }
     let mut candidates: Vec<_> = providers
         .iter()
         .filter(|(id, cfg)| id.as_str() != primary && cfg.enabled)
@@ -1090,6 +1112,32 @@ mod second_provider_tests {
     }
 
     #[test]
+    fn a_perfectly_good_second_provider_is_refused_while_the_setting_is_off() {
+        // The default, and the whole point of the setting. This is the exact
+        // configuration the feature was written for - a healthy, enabled,
+        // keyed, resolvable second provider - and it must still be refused
+        // until the person has asked for it on the Privacy tab. A conversation
+        // reaching a company they did not choose is not something reliability
+        // buys us the right to do.
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openrouter".to_string(),
+            cfg(true, Some("https://openrouter.ai/api/v1"), Some("x/y")),
+        );
+        // Proof it is the flag and nothing else: same inputs, both answers.
+        assert!(
+            pick_second_provider(false, "google", &providers, &provider_catalog(), &everyone_has_a_key)
+                .is_none(),
+            "a conversation was routed to a provider the user never chose"
+        );
+        assert!(
+            pick_second_provider(true, "google", &providers, &provider_catalog(), &everyone_has_a_key)
+                .is_some(),
+            "with the setting on, the fallback must still work"
+        );
+    }
+
+    #[test]
     fn a_speech_provider_is_never_an_inference_fallback() {
         // Azure sits in the same map as the chat providers, is enabled, has a
         // key, and its default_model is a VOICE. Handing it to the inference
@@ -1102,7 +1150,7 @@ mod second_provider_tests {
             "azure".to_string(),
             cfg(true, Some("https://x.cognitiveservices.azure.com"), Some("en-US-EmmaNeural")),
         );
-        let chosen = pick_second_provider("google", &providers, &provider_catalog(), &everyone_has_a_key);
+        let chosen = pick_second_provider(true, "google", &providers, &provider_catalog(), &everyone_has_a_key);
         assert!(chosen.is_none(), "a TTS provider was offered as a chat fallback: {chosen:?}");
     }
 
@@ -1119,7 +1167,7 @@ mod second_provider_tests {
             cfg(true, Some("https://openrouter.ai/api/v1"), Some("x/y")),
         );
 
-        let chosen = pick_second_provider("google", &providers, &provider_catalog(), &everyone_has_a_key)
+        let chosen = pick_second_provider(true, "google", &providers, &provider_catalog(), &everyone_has_a_key)
             .expect("openrouter should have been found after custom was skipped");
         assert_eq!(chosen["provider"], "openrouter");
     }
@@ -1131,7 +1179,7 @@ mod second_provider_tests {
             "openrouter".to_string(),
             cfg(true, Some("https://openrouter.ai/api/v1"), Some("x/y")),
         );
-        assert!(pick_second_provider("openrouter", &providers, &provider_catalog(), &everyone_has_a_key).is_none());
+        assert!(pick_second_provider(true, "openrouter", &providers, &provider_catalog(), &everyone_has_a_key).is_none());
     }
 
     #[test]
@@ -1143,7 +1191,7 @@ mod second_provider_tests {
             cfg(true, Some("https://openrouter.ai/api/v1"), Some("x/y")),
         );
         let only_openrouter = |id: &str| (id == "openrouter").then(|| "key".to_string());
-        let chosen = pick_second_provider("google", &providers, &provider_catalog(), &only_openrouter)
+        let chosen = pick_second_provider(true, "google", &providers, &provider_catalog(), &only_openrouter)
             .expect("openrouter has a key");
         assert_eq!(chosen["provider"], "openrouter");
     }
@@ -1155,6 +1203,6 @@ mod second_provider_tests {
             "openrouter".to_string(),
             cfg(false, Some("https://openrouter.ai/api/v1"), Some("x/y")),
         );
-        assert!(pick_second_provider("google", &providers, &provider_catalog(), &everyone_has_a_key).is_none());
+        assert!(pick_second_provider(true, "google", &providers, &provider_catalog(), &everyone_has_a_key).is_none());
     }
 }
