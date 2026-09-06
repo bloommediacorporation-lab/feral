@@ -23,6 +23,29 @@ import { cn } from '@/lib/utils';
  * accurate, needs an API key, audio leaves the device). The Groq key reuses the
  * BYOK keychain, entered inline so non-technical users never leave the flow.
  */
+/**
+ * Which option is actually selectable, given what this build can do.
+ *
+ * The row for on-device transcription is hidden when the binary does not have
+ * it — and on every build we ship it does not, because `whisper-rs` and
+ * `llama-cpp-sys` each vendor their own ggml and cannot be linked together.
+ * Hiding the row was the whole fix, and it was half of one: `choice` stayed
+ * `'local'` underneath, the Confirm button had nothing to object to (its only
+ * guard asks for the Groq key), and pressing it persisted a transcriber that
+ * cannot run. The person saw one option, pressed the one button, and got the
+ * option they were never shown.
+ *
+ * `null` means the probe has not answered yet, and it must not push anyone off
+ * the private option on a slow machine.
+ */
+export function selectableSttProvider(
+  stored: SttProvider | null,
+  localAvailable: boolean | null,
+): SttProvider {
+  const wanted = stored ?? 'local';
+  return wanted === 'local' && localAvailable === false ? 'groq' : wanted;
+}
+
 export function VoiceProviderCard({
   open,
   onOpenChange,
@@ -47,6 +70,13 @@ export function VoiceProviderCard({
       .catch(() => { if (alive) setLocalAvailable(true); });
     return () => { alive = false; };
   }, []);
+  // The probe is async and the card can already be open when it answers, so the
+  // selection has to move then too — otherwise the first open of a fresh
+  // install keeps the hidden `local` choice that this whole function exists to
+  // prevent.
+  useEffect(() => {
+    setChoice((c) => selectableSttProvider(c, localAvailable));
+  }, [localAvailable]);
   const [groqKey, setGroqKey] = useState('');
   const [hasGroqKey, setHasGroqKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -54,19 +84,24 @@ export function VoiceProviderCard({
   // Sync the selected option + Groq key status each time the card opens.
   useEffect(() => {
     if (!open) return;
-    setChoice(sttProvider ?? 'local');
+    setChoice(selectableSttProvider(sttProvider, localAvailable));
     setGroqKey('');
     tauri.raw
       .getByokSettings()
       .then((providers) => setHasGroqKey(providers.some((p) => p.id === 'groq' && p.has_api_key)))
       .catch(() => setHasGroqKey(false));
-  }, [open, sttProvider]);
+  }, [open, sttProvider, localAvailable]);
 
   // Cloud needs a key: either one already stored, or one typed in now.
   const needsKey = choice === 'groq' && !hasGroqKey && groqKey.trim().length === 0;
+  // ...and an option this build cannot run is never confirmable, whatever the
+  // key situation. Belt and braces with `selectableSttProvider`: that keeps the
+  // selection honest, this keeps the BUTTON honest, and the two failed
+  // independently before.
+  const unavailable = choice === 'local' && localAvailable === false;
 
   const confirm = async () => {
-    if (needsKey) return;
+    if (needsKey || unavailable) return;
     setSaving(true);
     try {
       if (choice === 'groq' && groqKey.trim()) {
@@ -140,7 +175,7 @@ export function VoiceProviderCard({
             never recovers. */}
 
         <DialogFooter>
-          <Button onClick={() => void confirm()} disabled={needsKey || saving}>
+          <Button onClick={() => void confirm()} disabled={needsKey || unavailable || saving}>
             {saving ? <Loader2 size={16} className="animate-spin" /> : t('voice.provider.confirm')}
           </Button>
         </DialogFooter>

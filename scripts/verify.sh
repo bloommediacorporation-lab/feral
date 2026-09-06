@@ -12,7 +12,12 @@ run() {
 
 run "CinderpawAgent tests" bash -c "cd \"$ROOT/CinderpawAgent\" && bun test --timeout 20000"
 run "CinderpawAgent typecheck" bash -c "cd \"$ROOT/CinderpawAgent\" && bunx tsc --noEmit"
-run "React tests" bash -c "cd \"$ROOT/frontend-react\" && bunx vitest run --pool=threads --maxWorkers=1"
+# The pool lives in frontend-react/vitest.config.ts now, so it is one answer
+# rather than a flag every caller has to remember - CI runs `npm test -- --run`
+# and had no such flag, which is how it would have met the forks-worker timeout.
+# `--maxWorkers=1` is kept as-is: it predates this change and its reason is not
+# recorded, so it is not mine to remove.
+run "React tests" bash -c "cd \"$ROOT/frontend-react\" && bunx vitest run --maxWorkers=1"
 run "React typecheck" bash -c "cd \"$ROOT/frontend-react\" && bunx tsc --noEmit"
 run "Sidecar build" bash -c "cd \"$ROOT/src-tauri\" && node scripts/build-sidecar.mjs"
 run "Rust check" bash -c "cd \"$ROOT\" && cargo check"

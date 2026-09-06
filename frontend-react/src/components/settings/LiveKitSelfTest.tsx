@@ -55,6 +55,21 @@ export function LiveKitSelfTest() {
    *  single reference leaks one silent, dead `<audio>` into the page per call —
    *  invisible, and enough to make "is anything playing?" unanswerable. */
   const sinks = useRef<HTMLAudioElement[]>([]);
+  /**
+   * True once the far end has actually published audio.
+   *
+   * Separate from `phase === 'live'`, which only means the ROOM connected and
+   * the microphone opened. Those are the easy half: a worker that died on
+   * startup still leaves a room you can join and a microphone you can enable,
+   * and the panel said "Connected. Say something, your assistant is listening."
+   * over a call with nobody on the other end. A self-test that reports success
+   * before the thing it tests is worse than no self-test, because it converts
+   * a broken install into a user who believes the install is fine.
+   */
+  const [agentAudible, setAgentAudible] = useState(false);
+  /** Set when the far end never arrived within the grace period below. */
+  const [agentSilent, setAgentSilent] = useState(false);
+  const agentWait = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearSinks = useCallback(() => {
     for (const el of sinks.current) {
@@ -69,8 +84,11 @@ export function LiveKitSelfTest() {
     room.current = null;
     await tauri.raw.endLivekitCall().catch(() => {});
     clearSinks();
+    if (agentWait.current) clearTimeout(agentWait.current);
     setPhase('idle');
     setDetail('');
+    setAgentAudible(false);
+    setAgentSilent(false);
     setMode(null);
   }, [clearSinks]);
 
@@ -101,6 +119,9 @@ export function LiveKitSelfTest() {
   const start = useCallback(async () => {
     setPhase('starting');
     setDetail('');
+    setAgentAudible(false);
+    setAgentSilent(false);
+    if (agentWait.current) clearTimeout(agentWait.current);
     setLines([]);
     setTimeline([]);
     setWarm(null);
@@ -122,6 +143,9 @@ export function LiveKitSelfTest() {
         // anything, and it lands after everything this function awaits. A
         // timeline that stopped at `connect` was measuring the easy half.
         callMark('agent_session_started');
+        setAgentAudible(true);
+        setAgentSilent(false);
+        if (agentWait.current) clearTimeout(agentWait.current);
         setTimeline(callTimeline());
         const el = track.attach();
         el.autoplay = true;
@@ -131,8 +155,18 @@ export function LiveKitSelfTest() {
       // The far end going away is not an error the user caused, but it is the
       // difference between "nothing is happening" and "it stopped".
       r.on(RoomEvent.Disconnected, () => {
-        setPhase('idle');
-        setDetail('');
+        // It used to `setDetail('')` here, which erased the explanation on the
+        // way out: the panel simply reset itself and the person was left with a
+        // test that had apparently never run. The far end going away is not an
+        // error they caused, but it IS the difference between "nothing is
+        // happening" and "it stopped", and that sentence is the whole reason
+        // this panel exists.
+        setPhase('error');
+        setDetail((prev) =>
+          prev ||
+          'The voice engine disconnected. It started and then went away, which usually means it crashed on the other side; the timings below show how far it got.',
+        );
+        if (agentWait.current) clearTimeout(agentWait.current);
       });
 
       await r.connect(call.url, call.token);
@@ -142,6 +176,12 @@ export function LiveKitSelfTest() {
       setMode(call.mode);
       setPhase('live');
       setTimeline(callTimeline());
+      // Connected is not working. If the far end never publishes audio, nothing
+      // above ever fails and the panel would sit on "Connected" forever, which
+      // is the exact reading a broken worker produces. Twelve seconds is past
+      // any normal dispatch and well short of a person's patience.
+      if (agentWait.current) clearTimeout(agentWait.current);
+      agentWait.current = setTimeout(() => setAgentSilent(true), 12_000);
     } catch (e) {
       const raw = e instanceof Error ? e.message : String(e);
       setPhase('error');
@@ -208,7 +248,26 @@ export function LiveKitSelfTest() {
         </p>
       )}
 
-      {phase === 'live' && (
+      {/* Three states, because they need three different answers. Connected and
+          waiting is not a failure and must not read as one; connected and
+          silent past the grace period is the finding this panel exists to
+          produce; connected and audible is the only one that has earned the
+          word "listening". */}
+      {phase === 'live' && !agentAudible && !agentSilent && (
+        <p className="text-xs text-text-muted flex items-center gap-1.5">
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+          Connected. Waiting for the voice engine to come on the line.
+        </p>
+      )}
+      {phase === 'live' && !agentAudible && agentSilent && (
+        <p className="text-xs text-[var(--warning)]">
+          Connected, but the voice engine never joined. The room and your
+          microphone are fine, so the problem is on the engine side. The timings
+          below show how far it got. Stop and try again; if it keeps happening,
+          this is the failure worth reporting.
+        </p>
+      )}
+      {phase === 'live' && agentAudible && (
         <p className="text-xs text-text-primary">
           {mode === 'assistant'
             ? 'Connected. Say something, your assistant is listening.'
