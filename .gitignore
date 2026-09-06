@@ -28,17 +28,21 @@ src-tauri/binaries/cinderpaw-agent
 # from `bun build --compile scripts/fake-lora-trainer.ts`).
 scripts/*.exe
 
-# Go TUI binary (go build output)
+# Go TUI binary (go build output). feral-tui is the pre-rename name; a stale
+# 21 MB copy of it was tracked until 2026-09-06.
 tui/cinderpaw-tui.exe
 tui/cinderpaw-tui
-tui/cinderpaw-tui.exe
-tui/cinderpaw-tui
+tui/feral-tui.exe
+tui/feral-tui
 
 # Git worktrees (paseo / git worktree add)
 .worktrees/
 
 # Graphify cache / output
 graphify-out/
+
+# Local audit reports are not product source.
+audit-out/
 
 # OS
 .DS_Store
