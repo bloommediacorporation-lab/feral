@@ -60,6 +60,13 @@ export interface OnboardingState {
   completedAt: number | null;
   /** True when the persisted record says "this user has already onboarded". */
   hasOnboardedBefore: boolean;
+  /**
+   * Set when neither storage layer accepted the completion record. The wizard
+   * shows it rather than closing on a lie: without it the person's chosen name
+   * vanishes and the wizard reopens on every launch with nothing explaining
+   * why. Cleared whenever a write succeeds.
+   */
+  persistFailed: boolean;
   /** Total number of steps in the wizard (used by progress bar + next/prev).
    *  Derived from STEP_IDS.length — see audit M-R1 fix. */
   totalSteps: number;
@@ -89,6 +96,7 @@ const DEFAULTS = {
   userName: '',
   agentName: 'Cinderpaw',
   hasOnboardedBefore: false,
+  persistFailed: false,
   skipped: false,
   completedAt: null,
   active: false,
@@ -139,7 +147,7 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
       completedAt,
       userName: s.userName,
       agentName: s.agentName || 'Cinderpaw',
-    });
+    }).then((stored) => set({ persistFailed: !stored }));
   },
 
   // Audit M-R2 fix. The Provider step's footer links ("Browse other
@@ -178,11 +186,17 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
       skipped: false,
       completedAt: record.completedAt,
       hasOnboardedBefore: true,
+      persistFailed: false,
     });
     // Persist to BOTH localStorage (sync) and the Tauri command
     // (async, survives uninstall + auto-updates). The function is
     // idempotent — calling it twice writes the same record.
-    void persistAsync(record);
+    //
+    // The result is no longer discarded. Closing the wizard first is still
+    // right — the UI must not wait on disk — but if neither layer took the
+    // record we have to say so, or the person's name is gone and the wizard
+    // simply reappears next launch with no explanation.
+    void persistAsync(record).then((stored) => set({ persistFailed: !stored }));
   },
 
   loadPersisted: async () => {
@@ -193,6 +207,7 @@ export const useOnboarding = create<OnboardingState>((set, get) => ({
     if (record?.completed) {
       set({
         hasOnboardedBefore: true,
+        persistFailed: false,
         userName: record.userName ?? '',
         agentName: record.agentName ?? 'Cinderpaw',
         completedAt: record.completedAt ?? null,

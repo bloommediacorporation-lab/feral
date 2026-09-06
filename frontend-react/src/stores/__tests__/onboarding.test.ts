@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useOnboarding } from '@/stores/onboarding';
+import { persistAsync } from '@/stores/onboardingPersistence';
 
 const reset = () =>
   useOnboarding.setState({
@@ -10,6 +11,7 @@ const reset = () =>
     skipped: false,
     completedAt: null,
     hasOnboardedBefore: false,
+    persistFailed: false,
   });
 
 describe('useOnboarding', () => {
@@ -174,5 +176,65 @@ describe('useOnboarding', () => {
     expect(useOnboarding.getState().active).toBe(true);
     expect(useOnboarding.getState().step).toBe(0);
     expect(useOnboarding.getState().userName).toBe('Darius');
+  });
+});
+
+describe('a completion that reached no storage is not treated as saved', () => {
+  /** A webview with storage disabled or full: `setItem` throws. */
+  function withBrokenLocalStorage<T>(fn: () => T): T {
+    const original = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    Object.defineProperty(window, 'localStorage', {
+      value: {
+        setItem: () => {
+          throw new Error('storage disabled');
+        },
+        getItem: () => null,
+      },
+      configurable: true,
+    });
+    try {
+      return fn();
+    } finally {
+      if (original) Object.defineProperty(window, 'localStorage', original);
+    }
+  }
+
+  it('reports failure when neither layer accepts the record', async () => {
+    // No Tauri shell in this environment, so the command layer refuses too:
+    // both layers down is exactly the case that used to close the wizard on a
+    // record that did not exist anywhere.
+    const ok = await withBrokenLocalStorage(() =>
+      persistAsync({ completed: true, completedAt: 1, userName: 'd', agentName: 'Cinderpaw' }),
+    );
+    expect(ok).toBe(false);
+  });
+
+  it('reports success when localStorage takes it, even with no Tauri shell', async () => {
+    const ok = await persistAsync({
+      completed: true,
+      completedAt: 1,
+      userName: 'd',
+      agentName: 'Cinderpaw',
+    });
+    expect(ok).toBe(true);
+  });
+
+  it('finish() closes the wizard immediately and still flags the failure', async () => {
+    await withBrokenLocalStorage(async () => {
+      useOnboarding.setState({ userName: 'Darius', agentName: 'Cinderpaw', persistFailed: false });
+      await useOnboarding.getState().finish();
+      // The wizard must not wait on disk, so it closes either way.
+      expect(useOnboarding.getState().active).toBe(false);
+      // ...but the failure is recorded instead of swallowed into console.warn,
+      // which is what let the person's name vanish and the wizard reappear on
+      // every launch with nothing explaining why.
+      await vi.waitFor(() => expect(useOnboarding.getState().persistFailed).toBe(true));
+    });
+  });
+
+  it('a successful finish leaves the flag clear', async () => {
+    useOnboarding.setState({ userName: 'Darius', persistFailed: true });
+    await useOnboarding.getState().finish();
+    await vi.waitFor(() => expect(useOnboarding.getState().persistFailed).toBe(false));
   });
 });

@@ -32,6 +32,7 @@ import { useSystemInfo } from '@/stores/systemInfo';
 import { useDownload } from '@/stores/download';
 import { useSettings } from '@/stores/settings';
 import { useCatalog } from '@/stores/catalog';
+import { useNotifications } from '@/stores/notifications';
 import { recommendModel } from '@/lib/hardwareRecommendation';
 import { tauri, type DiskEncryptionStatus, type SetupCandidate, type SetupVerifyOutcome } from '@/lib/tauri';
 import { CinderpawMascot } from '@/components/chat/mascot/CinderpawMascot';
@@ -939,7 +940,27 @@ export function OnboardingOrchestrator() {
   const start = useOnboarding((s) => s.start);
   const hasOnboardedBefore = useOnboarding((s) => s.hasOnboardedBefore);
   const active = useOnboarding((s) => s.active);
+  const persistFailed = useOnboarding((s) => s.persistFailed);
   const [checked, setChecked] = useState(false);
+
+  /*
+    Neither storage layer took the record. Before this, that was two
+    `console.warn` lines in devtools nobody has open: the wizard closed as if it
+    had worked, the name the person chose was gone, and it reopened on the next
+    launch, and the one after that, with nothing anywhere saying why. The
+    condition is rare and the consequence is a loop the person cannot get out
+    of, which is exactly the kind of thing that has to be on their screen.
+  */
+  useEffect(() => {
+    if (!persistFailed) return;
+    useNotifications.getState().push(
+      'error',
+      'Your setup could not be saved',
+      'Cinderpaw could not write to its folder in your home directory, so it ' +
+        'will ask you these questions again next time it starts. Check that ' +
+        'the disk is not full and that Cinderpaw is allowed to write there.',
+    );
+  }, [persistFailed]);
 
   useEffect(() => {
     void (async () => {

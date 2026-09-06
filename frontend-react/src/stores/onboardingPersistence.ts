@@ -52,13 +52,16 @@ export function readLocal(): PersistedOnboarding | null {
   }
 }
 
-export function writeLocal(record: PersistedOnboarding): void {
+export function writeLocal(record: PersistedOnboarding): boolean {
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
+    return true;
   } catch {
-    // localStorage may be full or disabled (private mode). We accept
-    // the failure silently — the in-memory store still has the state,
-    // and the Tauri command may also succeed.
+    // localStorage may be full or disabled (private mode). Not fatal on its
+    // own — the Tauri command may still succeed — but the caller has to be
+    // told, because if BOTH layers fail the wizard has just closed on a
+    // record that does not exist anywhere.
+    return false;
   }
 }
 
@@ -114,10 +117,26 @@ export async function loadPersistedAsync(): Promise<PersistedOnboarding | null> 
   return null;
 }
 
-export async function persistAsync(record: PersistedOnboarding): Promise<void> {
+/**
+ * Write the record to both layers, and say whether ANY of them took it.
+ *
+ * This used to return `Promise<void>` and swallow both failures into
+ * `console.warn`. The store called it as `void persistAsync(record)` after
+ * having already set `hasOnboardedBefore: true`, so on a machine where neither
+ * layer can write — a home the process cannot create in, a full disk, a webview
+ * with storage disabled — the wizard closed as if it had worked, the name the
+ * person chose was gone, and it reopened on the next launch. And the launch
+ * after that. Forever, with no message on any of them, because the only trace
+ * was a console line in devtools nobody has open.
+ *
+ * `false` means the record reached no durable storage at all. The caller is
+ * expected to put that on screen rather than log it.
+ */
+export async function persistAsync(record: PersistedOnboarding): Promise<boolean> {
   // localStorage is the source of truth for the current session. Write
   // it synchronously so even a sync error can't lose the record.
-  writeLocal(record);
+  const local = writeLocal(record);
   // Tauri command is best-effort but critical for uninstall survival.
-  await writeTauriCommand(record);
+  const durable = await writeTauriCommand(record);
+  return local || durable;
 }
