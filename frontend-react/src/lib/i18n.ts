@@ -96,6 +96,12 @@ const en = {
   'call.onDevice': 'on device',
   'call.leavesDevice': 'leaves device',
   'call.answer': 'Call',
+  'call.setUpVoice': 'Choose a voice',
+  // Said BEFORE the button is pressed. The old path booted Node, a LiveKit
+  // server and an npm install first, then failed with advice about checking
+  // the network — on a machine whose network was fine.
+  'call.noEngine':
+    'Cinderpaw has no voice to speak with yet. This version needs one you choose: a voice that runs on your machine, or a cloud voice with a key. Pick one and the call will work.',
   'call.listening': 'Listening…',
   'call.thinking': 'Thinking…',
   'call.speaking': 'Speaking…',
@@ -268,6 +274,9 @@ const ro: Strings = {
   'call.onDevice': 'pe dispozitiv',
   'call.leavesDevice': 'pleacă de pe dispozitiv',
   'call.answer': 'Sună',
+  'call.setUpVoice': 'Alege o voce',
+  'call.noEngine':
+    'Cinderpaw nu are încă o voce cu care să vorbească. Versiunea aceasta are nevoie de una aleasă de tine: o voce care rulează pe calculatorul tău, sau o voce din cloud cu o cheie. Alege una și apelul va funcționa.',
   'call.listening': 'Ascult…',
   'call.thinking': 'Mă gândesc…',
   'call.speaking': 'Vorbesc…',

@@ -134,6 +134,37 @@ export function keyOwner(
   return s2s ? { id: s2s.id, label: s2s.label } : null;
 }
 
+/**
+ * Which engine will speak, and whether the person chose it.
+ *
+ * Mirrors `cinderpaw_core::tts::default_engine()` on purpose: "the first
+ * engine this build can run without a key". Rust is what refuses the call, so
+ * a different rule here would enable a button whose press Rust then rejects —
+ * which is exactly the failure this function exists to end.
+ *
+ * `'none'` is a FACT, not an unknown. A fresh install has picked nothing, and
+ * on a build with no keyless engine (every Linux build and the Vulkan desktop
+ * build — ONNX Runtime's glibc floor keeps Piper and Kokoro out) there is
+ * genuinely nothing that can speak. Collapsing that into the same `null` the
+ * catalogue-read failure produces is what left the Call button enabled: it
+ * booted Node, a LiveKit server and an npm install, and only then failed,
+ * wrapped in advice about checking the network.
+ */
+export function chooseSpeechEngine(
+  providers: TtsProviderInfo[],
+  selectedId: string | null,
+): { engine: TtsProviderInfo | null; source: 'explicit' | 'default' | 'none' } {
+  const explicit = providers.find((e) => e.id === selectedId) ?? null;
+  if (explicit) return { engine: explicit, source: 'explicit' };
+  // Local first, because `catalog()` orders on-device engines ahead of hosted
+  // ones and a default that quietly picked a hosted engine would be a default
+  // that quietly starts uploading somebody's voice.
+  const fallback = providers.find((e) => e.available && !e.needsKey) ?? null;
+  return fallback
+    ? { engine: fallback, source: 'default' }
+    : { engine: null, source: 'none' };
+}
+
 export function CallOverlay({
   phase,
   stage = null,
@@ -173,6 +204,7 @@ export function CallOverlay({
   const artifactCount = useSyncExternalStore(subscribeArtifacts, artifactsSnapshot).length;
   const sttProvider = useUI((s) => s.sttProvider);
   const ttsProvider = useUI((s) => s.ttsProvider);
+  const setTtsProvider = useUI((s) => s.setTtsProvider);
   const callEngine = useUI((s) => s.callEngine);
   const s2sProvider = useUI((s) => s.s2sProvider);
   const setS2sProvider = useUI((s) => s.setS2sProvider);
@@ -257,6 +289,15 @@ export function CallOverlay({
    *  must not be blocked by a check that has not answered yet, nor allowed by one
    *  that failed. */
   const [ready, setReady] = useState<boolean | null>(null);
+  /**
+   * True when this build has no speech engine that works without a key AND
+   * none is configured. Separate from `ready === false` because the remedy is
+   * different: `ready === false` means a chosen engine is not finished (a voice
+   * to download, a key to paste, both of which this screen offers inline),
+   * while this means there is nothing to finish and the person has to choose
+   * something first.
+   */
+  const [noEngine, setNoEngine] = useState(false);
   const [key, setKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [mic, setMic] = useState<string | null>(null);
@@ -307,18 +348,44 @@ export function CallOverlay({
     tauri.voice
       .ttsProviders()
       .then(async (providers) => {
-        const chosen = providers.find((e) => e.id === ttsProvider) ?? null;
+        // Nothing picked is the state EVERY fresh install is in, so it cannot be
+        // left as "no engine". Fall back to the first engine this build can
+        // actually run without a key — the same rule as
+        // `cinderpaw_core::tts::default_engine()`, deliberately, because the two
+        // must agree: Rust is what refuses the call, and disagreeing here would
+        // enable a button whose press Rust then rejects.
+        //
+        // The picked engine is persisted, so the rest of the app (the voice pill,
+        // the settings screen) sees the same answer instead of quietly disagreeing
+        // with the call that just worked.
+        const { engine: chosen, source } = chooseSpeechEngine(providers, ttsProvider);
+        if (source === 'default' && chosen) setTtsProvider(chosen.id);
+
         setVoice(chosen);
+        if (!chosen) {
+          // Genuinely nothing: no engine was chosen and this build has none that
+          // speaks without a key. That is a FACT, not an unknown, and the two
+          // used to collapse into the same `null` — which left the Call button
+          // enabled, booted Node, a LiveKit server and an npm install, and only
+          // then failed, wrapped in advice about checking the network.
+          setNoEngine(true);
+          setReady(false);
+          return;
+        }
+        setNoEngine(false);
         // "Ready", not "has a key": Piper needs no key and would pass a key check
         // with no voice downloaded, which is a call that listens, thinks, and then
         // cannot answer.
-        setReady(chosen ? await tauri.voice.ttsReady(chosen.id) : null);
+        setReady(await tauri.voice.ttsReady(chosen.id));
       })
       .catch(() => {
+        // The catalogue could not be read. Unknown, not empty: leave the button
+        // alone and let the engine report the truth.
         setVoice(null);
+        setNoEngine(false);
         setReady(null);
       });
-  }, [phase, ttsProvider, currentS2s]);
+  }, [phase, ttsProvider, currentS2s, setTtsProvider]);
 
   const saveKey = async () => {
     // The vendor that is SELECTED, not a constant. This said `google` for every
@@ -680,10 +747,21 @@ export function CallOverlay({
               </span>
             )}
 
-            {ready === false && voice?.needsDownload && (
+            {/*
+              Nothing on this machine can speak yet. Said HERE, before the press,
+              rather than after twenty seconds of booting Node, a LiveKit server
+              and an npm install — which is what the person used to sit through
+              before being told to check whether they were online.
+            */}
+            {noEngine && (
+              <p className="max-w-sm text-center text-xs text-[var(--warning)]">
+                {t('call.noEngine')}
+              </p>
+            )}
+            {ready === false && !noEngine && voice?.needsDownload && (
               <p className="max-w-sm text-center text-xs text-[var(--warning)]">{t('call.voiceMissing')}</p>
             )}
-            {ready === false && (live || voice?.needsKey) && (
+            {ready === false && !noEngine && (live || voice?.needsKey) && (
               <div className="w-full max-w-sm">
                 <p className="mb-2 text-center text-xs text-text-muted">
                   {keyOwner(currentS2s, voice)
@@ -724,7 +802,28 @@ export function CallOverlay({
             <X size={20} />
           </RoundButton>
 
-          {phase === 'ready' ? (
+          {phase === 'ready' && noEngine ? (
+            /*
+              A disabled circle is a dead end with no instructions, and this is
+              the first screen a stranger reaches. So the control keeps its place
+              and its prominence and changes its JOB: it takes them to the one
+              screen where the choice can be made. One press forward instead of
+              one press into a failure.
+            */
+            <RoundButton
+              // `onChangeEngine`, not a route: the engine picker already exists
+              // and ChatInput already wires it to reopen the call as soon as a
+              // choice is made ("Picking a voice flows straight into the call it
+              // was blocking"). Sending them to Settings instead would drop them
+              // out of the call they were trying to make, and the settings rail
+              // has no voice category to land on.
+              onClick={onChangeEngine}
+              label={t('call.setUpVoice')}
+              tone="brand"
+            >
+              <Settings2 size={20} />
+            </RoundButton>
+          ) : phase === 'ready' ? (
             <RoundButton
               onClick={onAnswer}
               label={t('call.answer')}
