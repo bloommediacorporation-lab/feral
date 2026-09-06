@@ -134,8 +134,8 @@ fn reap_orphan_server() {
 /// again inside that window rejoined a room that already existed, so no
 /// dispatch fired and nobody was on the other end — while everything else
 /// reported success. A fresh name means every call is a creation.
-fn new_room() -> String {
-    format!("cinderpaw-{}", &random_secret()[..12])
+fn new_room() -> Result<String, String> {
+    Ok(format!("cinderpaw-{}", &random_secret()?[..12]))
 }
 
 /// One vendor that can carry a speech-to-speech call.
@@ -464,12 +464,24 @@ fn first_real_line(raw: &str) -> &str {
         .unwrap_or("No reason was reported.")
 }
 
-fn random_secret() -> String {
+/// 32 random bytes as hex, or an error naming why there are none.
+///
+/// A failure here means the OS has no entropy source. Refusing beats
+/// improvising a weaker one nobody would notice — but it used to refuse with
+/// `.expect()`, i.e. a panic, on a path whose entire signature is
+/// `Result<_, String>` and whose caller renders the error on the call screen.
+/// A panic there is not a refusal the person can read; depending on how the
+/// process is configured it is a dead task or a dead app, with the one sentence
+/// that explains it going wherever panics go. The refusal is the same; only who
+/// hears it changes.
+fn random_secret() -> Result<String, String> {
     let mut raw = [0u8; 32];
-    // A failure here means the OS has no entropy source. Refusing beats
-    // improvising a weaker one nobody would notice.
-    getrandom::getrandom(&mut raw).expect("no OS entropy available");
-    raw.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::getrandom(&mut raw).map_err(|e| {
+        format!(
+            "This computer's random number generator is unavailable ({e}), so Cinderpaw              cannot create the keys a call needs. This is an operating system problem              rather than a Cinderpaw one; restarting the computer usually clears it."
+        )
+    })?;
+    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn b64url(bytes: &[u8]) -> String {
@@ -690,10 +702,13 @@ impl Session {
     ///
     /// A fresh token rather than the old one: tokens expire, and handing back
     /// a stale one turns a warm start into a puzzling refusal an hour later.
-    pub fn rejoin(&mut self, identity: &str) -> String {
-        self.room = new_room();
+    /// `Err` only when the OS cannot produce randomness — see `random_secret`.
+    /// It reaches the call screen as a sentence instead of taking the process
+    /// down with a panic.
+    pub fn rejoin(&mut self, identity: &str) -> Result<String, String> {
+        self.room = new_room()?;
         self.token = mint_token(&self.key, &self.secret, identity, &self.room, 60 * 60);
-        self.token.clone()
+        Ok(self.token.clone())
     }
 }
 
@@ -756,14 +771,43 @@ pub(crate) async fn ensure_agent(
         provider.map(|p| p.label).unwrap_or("echo"),
     );
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let out = Command::new(npm)
+    // A deadline, because without one this await never returns. `output()` waits
+    // for the child to exit, and an npm that is alive but making no progress —
+    // a registry that accepts the connection and never answers, a proxy that
+    // holds it open, a lifecycle script waiting on input that will never come —
+    // is alive forever. The whole call start is behind this: the caller has
+    // already shown "Starting", and there is no timer, no error and no way
+    // through. On a fresh machine, which is the only machine that reaches this
+    // code, that is the first thing the product ever does.
+    //
+    // Ten minutes is deliberately generous. This is one install of three
+    // packages, and a slow connection must not be mistaken for a hang; the
+    // number exists to bound the failure, not to police the download.
+    const INSTALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+    let child = Command::new(npm)
         .args(["install", "--no-audit", "--no-fund"])
         .args(&want)
         .current_dir(&root)
         .env("PATH", augmented_path(node))
-        .output()
-        .await
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| format!("npm is needed once to set up voice, and could not be run: {e}"))?;
+    let out = match tokio::time::timeout(INSTALL_DEADLINE, child.wait_with_output()).await {
+        Ok(res) => res.map_err(|e| {
+            format!("npm is needed once to set up voice, and could not be run: {e}")
+        })?,
+        Err(_) => {
+            // `kill_on_drop` reaps the child when `child` is dropped on the way
+            // out, so a hung npm does not outlive the attempt and hold the
+            // node_modules directory for the next one.
+            return Err(format!(
+                "Setting up voice timed out. npm spent more than {} minutes installing the                  voice agent without finishing, so Cinderpaw stopped waiting. This is usually                  a network or proxy problem. Check your connection and try the call again;                  the download resumes where it left off.",
+                INSTALL_DEADLINE.as_secs() / 60
+            ));
+        }
+    };
     if !out.status.success() {
         let why = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
@@ -876,11 +920,11 @@ pub async fn start(
     };
 
     let key = "cinderpaw";
-    let secret = random_secret();
+    let secret = random_secret()?;
     let root = dir();
     std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
     let ports = pick_ports()?;
-    let room = new_room();
+    let room = new_room()?;
     let cfg = root.join("livekit.yaml");
     std::fs::write(&cfg, config_yaml(key, &secret, &ports))
         .map_err(|e| format!("cannot write the LiveKit config: {e}"))?;
@@ -1576,7 +1620,7 @@ listen tcp :61111: bind: Only one usage of each socket address (protocol/network
     #[test]
     fn every_call_gets_its_own_room() {
         assert_ne!(new_room(), new_room());
-        assert!(new_room().starts_with("cinderpaw-"));
+        assert!(new_room().unwrap().starts_with("cinderpaw-"));
     }
 
     /// A fixed port let an orphaned server from a previous run answer the
@@ -1596,8 +1640,8 @@ listen tcp :61111: bind: Only one usage of each socket address (protocol/network
     /// still opens the next one.
     #[test]
     fn each_call_gets_its_own_secret() {
-        assert_ne!(random_secret(), random_secret());
-        assert_eq!(random_secret().len(), 64, "32 bytes as hex");
+        assert_ne!(random_secret().unwrap(), random_secret().unwrap());
+        assert_eq!(random_secret().unwrap().len(), 64, "32 bytes as hex");
     }
 
     /// The table is what four separate pieces of the call agree about. A

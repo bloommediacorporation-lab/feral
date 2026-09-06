@@ -213,7 +213,7 @@ pub(crate) async fn start_livekit_call(
     let session = slot
         .as_mut()
         .ok_or_else(|| "the voice chain went away while the call was starting".to_string())?;
-    let token = session.rejoin("you");
+    let token = session.rejoin("you")?;
     tracing::info!(
         "livekit: joining a {} chain",
         if chain == cinderpaw_core::livekit::Chain::Warm { "warm" } else { "freshly booted" }

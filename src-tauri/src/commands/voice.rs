@@ -42,13 +42,34 @@ pub(crate) async fn save_voice_blob(bytes: Vec<u8>, ext: String) -> Result<Strin
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Drop voice recordings older than the retention window.
+/// Drop ORPHANED voice recordings older than the retention window.
 ///
-/// Best-effort and silent: this runs on the recording path, and a failure to
-/// tidy up must never stop a recording from being saved.
+/// The word orphaned is the whole fix. This used to delete every file older
+/// than thirty days, which included the audio of voice messages sitting in
+/// conversations the user had deliberately kept: record something in January,
+/// keep the chat, record anything at all in March, and January's recording was
+/// gone and its message pointed at a missing file. Nothing said so, because
+/// this runs on the recording path and is silent by design.
+///
+/// Two rules, in this order:
+///
+///  1. **Age is only a candidate, never a reason.** A file is deletable when it
+///     is old AND no saved conversation points at it.
+///  2. **Unknown means keep.** If the conversations cannot be enumerated, the
+///     set of references is unknown and nothing is deleted. Some megabytes of
+///     stale audio is a cost nobody notices; deleting a recording somebody kept
+///     cannot be undone.
+///
+/// Still best-effort and silent about its own failures: a tidy-up that cannot
+/// run must never stop a recording from being saved.
 fn prune_old_voice_blobs(dir: &std::path::Path) {
     const RETAIN: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
     let Ok(entries) = std::fs::read_dir(dir) else { return };
+
+    // Collect first, delete later. Building the candidate list before touching
+    // the conversations means the common case — nothing is old enough — pays
+    // nothing at all for the reference scan.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_file() {
@@ -56,7 +77,33 @@ fn prune_old_voice_blobs(dir: &std::path::Path) {
         }
         let Ok(modified) = meta.modified() else { continue };
         if modified.elapsed().unwrap_or_default() > RETAIN {
-            let _ = std::fs::remove_file(entry.path());
+            candidates.push(entry.path());
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+
+    let Ok(referenced) =
+        crate::conversations::referenced_audio_names_in_dir(&paths::conversations_dir())
+    else {
+        // Rule 2. One unreadable conversation file is enough to stop the whole
+        // sweep, and that is the intended severity: we do not know what it
+        // referenced.
+        tracing::warn!(
+            "voice: skipping the retention sweep — the saved conversations could not be \
+             read, so which recordings are still in use is unknown"
+        );
+        return;
+    };
+
+    for path in candidates {
+        let still_used = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| referenced.contains(n));
+        if !still_used {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
