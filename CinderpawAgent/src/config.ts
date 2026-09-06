@@ -272,8 +272,8 @@ export const CONFIG_SCHEMA: ConfigEntry[] = [
     description: "Turns on BENCHMARK MODE for this process. Two effects, both about keeping one measured run from contaminating the next: (1) the profile dir moves to <home>/runs/<runId>/, so skills, memory, journals and DB from run N are invisible to run N+1 (invariant I13); (2) the network is restricted to CINDERPAW_BENCHMARK_ALLOW_HOSTS and nothing else — every other destination is refused at both network exits (tool egress proxy and inference router). Unset = off, normal behaviour. Must be path-safe (letters, digits, dot, underscore, hyphen).", security: true },
   { name: "CINDERPAW_BENCHMARK_ALLOW_HOSTS", type: "list", default: null,
     description: "The ONLY hosts reachable while benchmark mode is on. Comma/semicolon separated, matched like a domain allowlist (\"api.example.com\" matches that host and its subdomains). Ignored when CINDERPAW_BENCHMARK_RUN_ID is unset. Empty while benchmark mode is on means NOTHING is reachable — deliberately fail-closed, and every refusal names this variable so the fix is on screen rather than in a log.", security: true },
-  { name: "CINDERPAW_DB", type: "path", default: "data/cinderpaw.db",
-    description: "Override the SQLite DB path. \":memory:\" is a sentinel and is not path-resolved. Falls back to a pre-rename data/feral.db when that is the file this install actually has.", security: false },
+  { name: "CINDERPAW_DB", type: "path", default: "<profile>/data/cinderpaw.db",
+    description: "Override the SQLite DB path. Defaults to data/cinderpaw.db INSIDE the profile dir (CINDERPAW_HOME, ~/.cinderpaw by default), so the database follows the profile rather than the working directory; it used to default to a relative path resolved against the cwd, which gave a standalone CLI a separate database per directory it was started from. A relative value set here is still resolved against the cwd, because that is what typing a relative path means. \":memory:\" is a sentinel and is not path-resolved. Falls back to a pre-rename data/feral.db when that is the file this install actually has.", security: false },
   { name: "CINDERPAW_AGENT_BASE_PROMPT", type: "string", default: null,
     description: "Universal operating manual injected into every model call; usually bundled.", security: false },
 
@@ -405,6 +405,35 @@ export function cinderpawHome(): string {
   // and the connector store all derive from this one function, so they all
   // move together or none of them do.
   return run ? join(base, "runs", run) : base;
+}
+
+/**
+ * Where the agent's SQLite database lives when nothing overrides it:
+ * `<profile>/data/cinderpaw.db`, or the pre-rename `data/feral.db` when that is
+ * the file this install actually has. Nothing is copied or moved; the file that
+ * exists is the file that gets opened.
+ *
+ * It lives here, beside `cinderpawHome()`, because it is a path rule and every
+ * other path rule in this sidecar is here. It used to live in `boot.ts` and
+ * return the RELATIVE string "data/cinderpaw.db", which `loadConfig` then
+ * resolved against `process.cwd()`.
+ *
+ * That was invisible on the desktop, where the Rust host passes `CINDERPAW_DB`
+ * explicitly and is the only thing in the tree that sets it. On the
+ * npm-installed CLI (`cinderpaw`, `feral` in package.json) there is no such
+ * host, so starting it from ~/Documents and then from ~ built two unrelated
+ * databases with two unrelated writer locks. Every memory, conversation,
+ * teammate and cost record belonged to whichever directory the shell was in,
+ * and nothing errored: the agent simply did not know you.
+ *
+ * The fractal tree, the leaf store, the tool observation log and the migration
+ * marker all live in `dirname(dbPath)`, so they come home with it.
+ */
+export function defaultDbPath(): string {
+  const dataDir = join(cinderpawHome(), "data");
+  const current = join(dataDir, "cinderpaw.db");
+  const legacy = join(dataDir, "feral.db");
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
 }
 
 /** Brand names for the profile dir. Mirrors `crates/cinderpaw-core/src/brand.rs`. */

@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { openDatabase } from "./db.ts";
 import { SIDECAR_PROTOCOL } from "./protocol.ts";
 import { dispatchMessage } from "./dispatch.ts";
-import { agentProfileDirs, benchmarkRunId, cfgBool, cfgInt, cfgList, cfgPath, cinderpawHome, readEnv, scratchRoot, searxngOrigin } from "./config.ts";
+import { agentProfileDirs, benchmarkRunId, cfgBool, cfgInt, cfgList, cfgPath, cinderpawHome, defaultDbPath, readEnv, scratchRoot, searxngOrigin } from "./config.ts";
 import { AuditLog } from "./egress/audit-log.ts";
 import { EgressProxy } from "./egress/egress-proxy.ts";
 import { RealProcessSandbox } from "./egress/process-sandbox.ts";
@@ -284,15 +284,6 @@ function isLoopbackUrl(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** `data/cinderpaw.db`, unless a pre-rename `data/feral.db` is the one that
-  * actually holds this install's history. Nothing is copied or moved: the file
-  * that exists is the file that gets opened. */
-function defaultDbPath(): string {
-  const current = "data/cinderpaw.db";
-  const legacy = "data/feral.db";
-  return !existsSync(resolve(current)) && existsSync(resolve(legacy)) ? legacy : current;
 }
 
 function loadConfig(): AppConfig {
@@ -605,7 +596,14 @@ export async function boot(transportOverride?: Transport) {
   recall.setGraph(memoryGraph);
 
   // --- ECC tool observation telemetry ---
-  const dataDir = config.dbPath === ":memory:" ? "data" : require("node:path").dirname(config.dbPath);
+  // The fractal tree, the leaf store, the observation log and the migration
+  // marker all live beside the database, so this follows `dbPath` home. The
+  // in-memory case had a relative `"data"` literal, which put an in-memory
+  // run's tree in whatever directory it happened to start from.
+  const dataDir =
+    config.dbPath === ":memory:"
+      ? join(CINDERPAW_HOME, "data")
+      : require("node:path").dirname(config.dbPath);
   const observations = new ToolObservationLog(dataDir);
 
   // --- Fractal Memory Search (semantic recall over the RAPTOR tree) ---
