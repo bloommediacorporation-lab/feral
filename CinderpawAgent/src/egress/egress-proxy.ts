@@ -417,7 +417,7 @@ export class EgressProxy {
       // Copy caller headers so we can strip credentials on a cross-origin hop
       // without mutating the caller's object.
       let headers: Record<string, string> = { ...(init?.headers ?? {}) };
-      let currentHost = parsed.hostname.toLowerCase();
+      let currentOrigin = parsed.origin.toLowerCase();
 
       for (let hop = 0; ; hop++) {
         const res = await this.#config.underlyingFetch(parsed.toString(), {
@@ -448,17 +448,26 @@ export class EgressProxy {
             method = "GET";
             body = undefined;
           }
-          // Drop credentials when the origin changes so a redirect can't
-          // leak an Authorization/Cookie header to a different host.
-          const nextHost = next.hostname.toLowerCase();
-          if (nextHost !== currentHost) {
+          // Drop credentials when the ORIGIN changes so a redirect can't
+          // leak an Authorization/Cookie header somewhere else.
+          //
+          // Origin, not hostname. The comment always said origin; the code
+          // compared `hostname`, which is the host and nothing else — so
+          // `https://api.example.com` redirecting to `http://api.example.com`
+          // kept the Authorization header and sent it in clear text, and a hop
+          // from :443 to :8080 on the same host kept it too. Both are the same
+          // hostname and neither is the same origin. `URL.origin` is
+          // scheme + host + port, which is the comparison this was always
+          // meant to be.
+          const nextOrigin = next.origin.toLowerCase();
+          if (nextOrigin !== currentOrigin) {
             for (const k of Object.keys(headers)) {
               const lk = k.toLowerCase();
               if (lk === "authorization" || lk === "cookie" || lk === "proxy-authorization") {
                 delete headers[k];
               }
             }
-            currentHost = nextHost;
+            currentOrigin = nextOrigin;
           }
           parsed = await validateHop(next.toString());
           continue;

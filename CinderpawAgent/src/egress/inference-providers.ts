@@ -1410,13 +1410,64 @@ export function deadlineController(
   };
 }
 
+/**
+ * Refuse to carry the API key across a redirect to a different origin.
+ *
+ * The inference path calls the global `fetch`, whose default `redirect:
+ * "follow"` chases a 3xx for us. That is fine for a browser and wrong here for
+ * two reasons:
+ *
+ *  1. The platform strips `Authorization` on a cross-origin redirect. It does
+ *     not strip `x-api-key`, because no specification knows that header is a
+ *     credential. Anthropic authenticates with `x-api-key`, so an inference
+ *     endpoint answering `302 Location: http://someone-else/` was handed the
+ *     user's Anthropic key and nothing in the platform objected.
+ *  2. The audit log records the URL we asked for, never the one that answered,
+ *     so the hop left no trace anywhere.
+ *
+ * `redirect: "manual"` gives us the decision. A same-origin redirect is
+ * ordinary path normalisation and is followed with the headers intact. A
+ * cross-origin one is refused, loudly, naming both origins: an inference
+ * endpoint that wants to move a key to another host is not a case worth
+ * guessing about.
+ */
+const MAX_INFERENCE_REDIRECTS = 3;
+
+async function fetchFollowingSameOriginOnly(
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    const res = await fetch(current, { ...init, redirect: "manual" });
+    const location = res.headers.get("location");
+    if (res.status < 300 || res.status >= 400 || !location) return res;
+
+    if (hop >= MAX_INFERENCE_REDIRECTS) {
+      throw new InferenceError(
+        `inference endpoint ${url} redirected more than ${MAX_INFERENCE_REDIRECTS} times`,
+      );
+    }
+    const next = new URL(location, current);
+    const from = new URL(current);
+    if (next.origin.toLowerCase() !== from.origin.toLowerCase()) {
+      throw new InferenceError(
+        `inference endpoint ${from.origin} redirected to ${next.origin}. ` +
+          `Refusing to follow: that would send your API key to a different server. ` +
+          `If this is expected, set the provider's base URL to ${next.origin} yourself.`,
+      );
+    }
+    current = next.toString();
+  }
+}
+
 async function fetchStream(
   url: string,
   body: unknown,
   headers: Record<string, string>,
   signal: AbortSignal,
 ): Promise<Response> {
-  const res = await fetch(url, {
+  const res = await fetchFollowingSameOriginOnly(url, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
@@ -1450,7 +1501,7 @@ export async function postJson(
     else externalSignal.addEventListener("abort", onExt, { once: true });
   }
   try {
-    const res = await fetch(url, {
+    const res = await fetchFollowingSameOriginOnly(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...extraHeaders },
       body: JSON.stringify(body),
