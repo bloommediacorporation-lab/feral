@@ -14,11 +14,25 @@ export function useVoiceRecorder() {
   const chunksRef = useRef<Blob[]>([]);
   const startedAtRef = useRef(0);
 
-  const start = useCallback(async () => {
+  /**
+   * Begin recording. Resolves to the failure, or `null` when it started.
+   *
+   * The return value is the point. Callers used to press the button, `await`
+   * this, and then read `rec.error` on the next line — which is the value
+   * captured by the CURRENT render's closure, not the one this call just set.
+   * React had not re-rendered yet, so on a first refusal the caller read `null`
+   * and said nothing: the person pressed the microphone, the browser refused
+   * it, and the button quietly went back to idle with no explanation anywhere.
+   * A second press then reported the FIRST press's outcome.
+   *
+   * State is still set for anything that renders from it; this is for the
+   * caller that has to act on what just happened.
+   */
+  const start = useCallback(async (): Promise<RecError> => {
     setError(null);
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
       setError('unsupported');
-      return;
+      return 'unsupported';
     }
     let gotStream = false;
     try {
@@ -51,6 +65,7 @@ export function useVoiceRecorder() {
       startedAtRef.current = Date.now();
       rec.start();
       setState('recording');
+      return null;
     } catch (err) {
       // Release the microphone. `getUserMedia` may well have SUCCEEDED and the
       // failure come from `new MediaRecorder(stream)` — WebView2 is picky about
@@ -68,8 +83,10 @@ export function useVoiceRecorder() {
       // If we did get the stream and the failure came after, the microphone is
       // fine and the recorder could not encode: sending that person to their
       // permission settings wastes their time on something that is not wrong.
-      setError(gotStream ? 'unsupported' : 'denied');
+      const failure: RecError = gotStream ? 'unsupported' : 'denied';
+      setError(failure);
       setState('idle');
+      return failure;
     }
   }, []);
 

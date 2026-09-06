@@ -157,9 +157,14 @@ function ChatInput({ isEmpty, sendFn, alwaysEnabled }, ref) {
 
   const onMic = async () => {
     if (rec.state === 'recording') { rec.stop(); return; }
-    await rec.start();
-    if (rec.error === 'denied') useNotifications.getState().push('error', t('voice.permissionDenied'));
-    if (rec.error === 'unsupported') useNotifications.getState().push('error', t('voice.unsupported'));
+    // The RETURNED failure, not `rec.error`. Reading the state here read this
+    // render's closure, which `start()` has not updated yet — so a first
+    // refusal said nothing at all and the microphone button just went back to
+    // idle. Being told nothing is the worst possible answer to "I pressed the
+    // microphone and pressed Deny by accident".
+    const failure = await rec.start();
+    if (failure === 'denied') useNotifications.getState().push('error', t('voice.permissionDenied'));
+    if (failure === 'unsupported') useNotifications.getState().push('error', t('voice.unsupported'));
   };
 
   // Press-and-hold the mic to (re)open the provider chooser; a normal tap
@@ -455,7 +460,17 @@ function ChatInput({ isEmpty, sendFn, alwaysEnabled }, ref) {
               durationMs={rec.durationMs}
               peaks={voicePeaks}
               onDelete={() => { rec.reset(); setVoicePeaks([]); }}
-              onReRecord={() => { rec.reset(); setVoicePeaks([]); void rec.start(); }}
+              onReRecord={() => {
+                rec.reset();
+                setVoicePeaks([]);
+                // Same reason as the microphone button: a refusal here was
+                // silent too, and this one happens after the person has already
+                // recorded something once.
+                void rec.start().then((failure) => {
+                  if (failure === 'denied') useNotifications.getState().push('error', t('voice.permissionDenied'));
+                  if (failure === 'unsupported') useNotifications.getState().push('error', t('voice.unsupported'));
+                });
+              }}
             />
           )}
           <Textarea
