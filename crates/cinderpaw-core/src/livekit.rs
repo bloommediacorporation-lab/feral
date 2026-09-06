@@ -1317,6 +1317,65 @@ mod tests {
     /// agent posted a body `/runtime/chat` could not read. Both were invisible
     /// until somebody made a call and got nothing.
     #[test]
+    /// Every tuning setting the agent defaults must also have a validation
+    /// rule, read out of the file rather than listed here so a fourth setting
+    /// cannot be added without this noticing.
+    ///
+    /// The rule is not decoration: `endpointing()` looks the rule up by key and
+    /// calls it. A default with no rule used to mean `undefined(value)`, which
+    /// throws at call start. It is defended in the file too; this is what stops
+    /// it being written in the first place.
+    #[test]
+    fn every_tuning_default_has_a_validation_rule() {
+        let agent = include_str!("livekit_agent.mjs");
+        let block = |name: &str| {
+            let start = agent
+                .find(&format!("const {name} = {{"))
+                .unwrap_or_else(|| panic!("{name} is gone from livekit_agent.mjs"));
+            let end = start
+                + agent[start..]
+                    .find("
+};")
+                    .expect("an unterminated object literal");
+            &agent[start..end]
+        };
+        // Keys are the identifiers followed by a colon at the start of a line.
+        let keys = |body: &str| -> Vec<String> {
+            body.lines()
+                .filter_map(|l| {
+                    let t = l.trim();
+                    if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+                        return None;
+                    }
+                    let name = t.split(':').next()?.trim();
+                    if name.is_empty()
+                        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        || !t.contains(':')
+                    {
+                        return None;
+                    }
+                    Some(name.to_string())
+                })
+                .collect()
+        };
+        let defaults = keys(block("ENDPOINTING_DEFAULTS"));
+        let rules = keys(block("ENDPOINTING_RULES"));
+        assert_eq!(defaults.len(), 3, "found {defaults:?}; the scan is not finding them");
+        for key in &defaults {
+            assert!(
+                rules.contains(key),
+                "{key} has a default but no validation rule, so a hand-edited                  voice-tuning.json could send anything to the vendor"
+            );
+        }
+        for key in &rules {
+            assert!(
+                defaults.contains(key),
+                "{key} has a validation rule but no default, so it is never read"
+            );
+        }
+    }
+
+    #[test]
     fn every_setting_rust_hands_the_agent_is_one_the_agent_reads() {
         let rust = include_str!("livekit.rs");
         let agent = include_str!("livekit_agent.mjs");

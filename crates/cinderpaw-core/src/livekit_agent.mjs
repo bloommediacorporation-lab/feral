@@ -405,17 +405,95 @@ const ENDPOINTING_DEFAULTS = {
  * Unknown keys are ignored rather than merged, so a typo in a hand-edited
  * file cannot send the vendor a field it will reject and kill the call.
  */
+/**
+ * What each setting has to be for the vendor to accept it.
+ *
+ * One entry per key in ENDPOINTING_DEFAULTS, and `endpointing()` refuses any
+ * key that has no entry. Two parallel objects that must agree is a rule waiting
+ * to be half-updated: a fourth setting added to the defaults and forgotten here
+ * would otherwise call `undefined(value)` and take the call down at start,
+ * which is worse than the unvalidated value this exists to catch.
+ */
+const ENDPOINTING_RULES = {
+  endOfSpeechSensitivity: (v) =>
+    typeof v === 'string' && /^END_SENSITIVITY_(LOW|HIGH)$/.test(v),
+  // Milliseconds. The upper bounds are not vendor limits, they are sanity: half
+  // a minute of silence before a turn closes is a hang, and a person who typed
+  // an extra zero should be told rather than left wondering why the call broke.
+  silenceDurationMs: (v) => Number.isFinite(v) && v >= 0 && v <= 30_000,
+  prefixPaddingMs: (v) => Number.isFinite(v) && v >= 0 && v <= 5_000,
+};
+
 function endpointing() {
   const home = (process.env.CINDERPAW_HOME || '').trim() || join(homedir(), '.cinderpaw');
+  const path = join(home, 'voice-tuning.json');
   let overrides = {};
+  let raw;
   try {
-    const raw = JSON.parse(readFileSync(join(home, 'voice-tuning.json'), 'utf8'));
-    for (const key of Object.keys(ENDPOINTING_DEFAULTS)) {
-      if (raw[key] !== undefined && raw[key] !== null) overrides[key] = raw[key];
-    }
+    raw = readFileSync(path, 'utf8');
   } catch {
-    // No file, or an unreadable one. Both mean "use the defaults", which is
-    // what almost every machine will do forever.
+    // Genuinely no file. This is what almost every machine does forever, and it
+    // is the one case that deserves no output at all.
+    return { ...ENDPOINTING_DEFAULTS };
+  }
+  // Past here the person MADE this file, so every way it can fail to take
+  // effect is worth a line. The old code caught the read and the parse in one
+  // `catch` whose comment said "No file, or an unreadable one. Both mean use
+  // the defaults" — which is true of the behaviour and false of the person: one
+  // of those two is someone who edited a file and is now watching it do
+  // nothing, with no way to find out why. The whole point of the file is that
+  // tuning it costs a hang up and a redial rather than a rebuild.
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.error(
+      `voice tuning: ${path} is not valid JSON (${e.message}). Using the built-in ` +
+        `settings and ignoring the file. Fix the file or delete it.`,
+    );
+    return { ...ENDPOINTING_DEFAULTS };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error(
+      `voice tuning: ${path} must contain a JSON object. Using the built-in settings.`,
+    );
+    return { ...ENDPOINTING_DEFAULTS };
+  }
+  for (const key of Object.keys(ENDPOINTING_DEFAULTS)) {
+    const value = parsed[key];
+    if (value === undefined || value === null) continue;
+    // Recognised keys used to be copied through on nothing but a null check, so
+    // `silenceDurationMs: "700"` or `-5` went straight to the vendor. A rejected
+    // field kills the call, and the reason surfaces as the call not starting.
+    const rule = ENDPOINTING_RULES[key];
+    // A default with no rule is a bug in this file, not in the person's file.
+    // Refusing is the safe half of it, and saying so is how it gets fixed
+    // instead of silently ignoring a setting somebody set.
+    if (typeof rule !== 'function') {
+      console.error(
+        `voice tuning: ${key} has no validation rule, so it is ignored. ` +
+          `This is a Cinderpaw bug; please report it.`,
+      );
+      continue;
+    }
+    if (!rule(value)) {
+      console.error(
+        `voice tuning: ignoring ${key}=${JSON.stringify(value)} from ${path}, ` +
+          `it is not a value this setting accepts. Using ${JSON.stringify(ENDPOINTING_DEFAULTS[key])}.`,
+      );
+      continue;
+    }
+    overrides[key] = value;
+  }
+  // Unknown keys are still ignored rather than merged, and now said out loud:
+  // a typo is indistinguishable from a setting that does nothing otherwise.
+  const unknown = Object.keys(parsed).filter((k) => !(k in ENDPOINTING_DEFAULTS));
+  if (unknown.length > 0) {
+    console.error(
+      `voice tuning: ${path} has ${unknown.length} setting(s) Cinderpaw does not know ` +
+        `(${unknown.join(', ')}). They are ignored. Known settings: ` +
+        `${Object.keys(ENDPOINTING_DEFAULTS).join(', ')}.`,
+    );
   }
   const merged = { ...ENDPOINTING_DEFAULTS, ...overrides };
   if (Object.keys(overrides).length > 0) {
