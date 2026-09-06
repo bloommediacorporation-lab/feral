@@ -18,11 +18,17 @@ interface CinderpawStore {
   offline: boolean;
   /** True while the Rust supervisor is attempting an automatic restart. */
   restarting: boolean;
+  /**
+   * Why Agent mode stopped, in the words Rust used. Only set when the
+   * supervisor gave up (`restarting: false`), because that is the only case
+   * where the person has to do something. Null the rest of the time.
+   */
+  offlineReason: string | null;
 
   setModelConfig(cfg: CinderpawModelConfigView): void;
   setReady(v: boolean): void;
   setModelError(err: string | null): void;
-  setOffline(offline: boolean, restarting: boolean): void;
+  setOffline(offline: boolean, restarting: boolean, reason?: string | null): void;
 
   /** Fetch and cache the current sidecar model config (display-safe, no key). */
   fetchModelConfig(): Promise<void>;
@@ -41,6 +47,7 @@ export const useCinderpawStore = create<CinderpawStore>((set) => ({
   switching: false,
   offline: false,
   restarting: false,
+  offlineReason: null,
 
   setModelConfig(cfg) {
     set({ modelConfig: cfg, modelError: null });
@@ -48,11 +55,11 @@ export const useCinderpawStore = create<CinderpawStore>((set) => ({
 
   setReady(v) {
     // Coming (back) online clears the offline banner.
-    set(v ? { isReady: true, offline: false, restarting: false } : { isReady: false });
+    set(v ? { isReady: true, offline: false, restarting: false, offlineReason: null } : { isReady: false });
   },
 
-  setOffline(offline, restarting) {
-    set({ offline, restarting, ...(offline ? { isReady: false } : {}) });
+  setOffline(offline, restarting, reason = null) {
+    set({ offline, restarting, offlineReason: reason, ...(offline ? { isReady: false } : {}) });
   },
 
   setModelError(err) {

@@ -15,6 +15,7 @@ const STARTUP_WARNING_DELAY_MS = 15_000;
 export function AgentOfflineBanner() {
   const offline = useCinderpawStore((s) => s.offline);
   const restarting = useCinderpawStore((s) => s.restarting);
+  const offlineReason = useCinderpawStore((s) => s.offlineReason);
   const isReady = useCinderpawStore((s) => s.isReady);
   const [startupSlow, setStartupSlow] = useState(false);
 
@@ -83,9 +84,13 @@ export function AgentOfflineBanner() {
       ) : (
         <>
           <WifiOff size={13} className="shrink-0" />
+          {/* The reason comes from Rust, which is the only side that knows
+              whether the sidecar was never found or found and repeatedly
+              died. The generic sentence stays as the fallback for an older
+              host that emits no `error`. */}
           <span>
-            Cinderpaw Agent is offline and automatic restarts were suspended after
-            repeated crashes. Restart the app to bring Agent mode back.
+            {offlineReason ??
+              'Cinderpaw Agent is offline and automatic restarts were suspended after repeated crashes. Restart the app to bring Agent mode back.'}
           </span>
         </>
       )}

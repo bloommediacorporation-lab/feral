@@ -771,20 +771,40 @@ fn clear_key(provider_id: &str) -> anyhow::Result<()> {
     crate::secret_store::clear_with_file_key(KEYCHAIN_SERVICE, provider_id, provider_id)
 }
 
+/// May the legacy plaintext `byok.json` be deleted after a migration pass?
+///
+/// Only when something moved AND nothing failed. The previous condition was
+/// `migrated_any` alone, which deleted the file whenever any single provider
+/// migrated — taking with it the plaintext key of every provider whose own
+/// migration had just failed. `byok.json` is the only copy of those, so that
+/// was a key destroyed by a neighbour's success.
+fn may_remove_legacy_file(migrated_any: bool, failed: &[String]) -> bool {
+    migrated_any && failed.is_empty()
+}
+
 /// Load BYOK settings: non-secret metadata from `byok.json`, API keys from the
 /// OS keychain. Migrates any plaintext keys found in a legacy `byok.json` into
-/// the keychain, then deletes the legacy file.
+/// the keychain, and deletes the legacy file only once every key is safely in
+/// the keychain.
 pub fn load(_settings: &crate::settings::Settings) -> ByokSettings {
     let path = crate::paths::cinderpaw_dir().join("byok.json");
     let mut s: ByokSettings =
         crate::atomic_file::read_json_or_report(&path, "your provider settings");
 
     let mut migrated_any = false;
+    // Which providers could NOT be moved into the keychain. This list is the
+    // reason the file survives below: `byok.json` is the only copy of a key
+    // whose migration failed, so deleting it because a DIFFERENT provider
+    // migrated destroys it. One locked keychain, one rejected entry, one
+    // transient error, and the key is gone on the next start with nothing to
+    // recover it from.
+    let mut failed: Vec<String> = Vec::new();
     for (id, cfg) in s.providers.iter_mut() {
         if !cfg.api_key.is_empty() {
             // Legacy plaintext key present in the file → migrate to keychain.
             if let Err(e) = byok_set(id, &cfg.api_key) {
                 tracing::warn!(provider = %id, ?e, "byok: failed to migrate key to keychain");
+                failed.push(id.clone());
             } else {
                 migrated_any = true;
             }
@@ -794,7 +814,7 @@ pub fn load(_settings: &crate::settings::Settings) -> ByokSettings {
         }
     }
 
-    if migrated_any {
+    if may_remove_legacy_file(migrated_any, &failed) {
         // After migration, remove the legacy plaintext file entirely.
         // The metadata is regenerated on-demand when save() is called.
         if let Err(e) = std::fs::remove_file(&path) {
@@ -802,6 +822,29 @@ pub fn load(_settings: &crate::settings::Settings) -> ByokSettings {
         } else {
             tracing::info!("byok: migrated plaintext API key(s) into the OS keychain and removed byok.json");
         }
+    } else if !failed.is_empty() {
+        // The file stays exactly as it is. The keys that DID reach the keychain
+        // are still in it as plaintext, which is not worse than the state we
+        // were already in: this branch only runs when the keychain is failing,
+        // and the file already held every one of them. The next start retries
+        // every provider, and the first start where all of them succeed takes
+        // the branch above and removes the file.
+        //
+        // Said on stderr as well as in the log, because the log is where this
+        // went to die: nobody reads it, and the symptom on the other side is a
+        // provider that silently stops answering.
+        let names = failed.join(", ");
+        tracing::warn!(
+            providers = %names,
+            "byok: keeping byok.json — these providers' keys could not be moved to the OS keychain, \
+             and the file is the only copy of them"
+        );
+        eprintln!(
+            "[cinderpaw] WARNING: could not move the API key(s) for {names} into the OS keychain. \
+             {} has been left in place because it is the only copy of them. \
+             Cinderpaw will try again on the next start.",
+            path.display()
+        );
     }
 
     s
@@ -888,6 +931,22 @@ fn write_metadata(settings: &ByokSettings) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression: one provider migrating used to authorise deleting the
+    /// file that held another provider's un-migrated key.
+    #[test]
+    fn a_failed_migration_keeps_the_only_copy_of_its_key() {
+        let none: [String; 0] = [];
+        // Nothing to do: no file to remove.
+        assert!(!may_remove_legacy_file(false, &none));
+        // Everything moved: the plaintext file is now redundant, remove it.
+        assert!(may_remove_legacy_file(true, &none));
+        // The bug. Something moved, something did not — the file is the only
+        // place the failed key still exists, so it must survive.
+        assert!(!may_remove_legacy_file(true, &["openai".to_string()]));
+        // And a pass where nothing moved and something failed keeps it too.
+        assert!(!may_remove_legacy_file(false, &["openai".to_string()]));
+    }
 
     #[test]
     fn google_default_base_url_uses_openai_compat_path() {

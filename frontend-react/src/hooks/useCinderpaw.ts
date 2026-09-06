@@ -515,16 +515,27 @@ export function useCinderpawGlobal() {
       // #11: the Rust supervisor emits this when the sidecar dies. While
       // `restarting` is true it will respawn with backoff and agent-ready
       // will clear the banner; when false, the supervisor gave up.
-      unlistenExit = await listen<{ code: number | null; restarting: boolean }>(
+      unlistenExit = await listen<{
+        code: number | null;
+        restarting: boolean;
+        error?: string | null;
+      }>(
         'cinderpaw://agent-exit',
         (event) => {
-          setOffline(true, event.payload.restarting);
+          const reason = event.payload.error?.trim() || null;
+          setOffline(true, event.payload.restarting, reason);
           if (!event.payload.restarting) {
+            // The reason comes from Rust, which is the only side that knows
+            // WHICH failure this was: the sidecar was never found, or it was
+            // found and died six times. The hardcoded sentence that used to
+            // live here said "crashed repeatedly" for both, which is a
+            // confident wrong answer in the case the process never started.
             useNotifications.getState().push(
               'error',
               'Cinderpaw Agent stopped',
-              'The agent process crashed repeatedly and automatic restarts were ' +
-                'suspended. Restart the app to bring Agent mode back.',
+              reason ??
+                'Agent mode stopped and automatic restarts were suspended. ' +
+                  'Restart the app to bring Agent mode back.',
             );
           }
         },

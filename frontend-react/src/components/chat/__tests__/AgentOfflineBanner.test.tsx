@@ -5,7 +5,7 @@ import { AgentOfflineBanner } from '../AgentOfflineBanner';
 
 beforeEach(() => {
   vi.useFakeTimers();
-  useCinderpawStore.setState({ isReady: false, offline: false, restarting: false });
+  useCinderpawStore.setState({ isReady: false, offline: false, restarting: false, offlineReason: null });
 });
 
 afterEach(() => vi.useRealTimers());
@@ -30,5 +30,39 @@ describe('AgentOfflineBanner startup grace', () => {
     act(() => vi.advanceTimersByTime(15_000));
 
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+});
+
+describe('AgentOfflineBanner gave-up state', () => {
+  it('shows the reason Rust sent instead of guessing the cause', () => {
+    render(<AgentOfflineBanner />);
+    act(() =>
+      useCinderpawStore
+        .getState()
+        .setOffline(true, false, 'Antivirus quarantined the program. Reinstall Cinderpaw.'),
+    );
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Antivirus quarantined the program.');
+    // The old hardcoded cause said this for every failure, including the one
+    // where the process never started at all.
+    expect(alert).not.toHaveTextContent('repeated crashes');
+  });
+
+  it('falls back to the generic sentence when an older host sends no reason', () => {
+    render(<AgentOfflineBanner />);
+    act(() => useCinderpawStore.getState().setOffline(true, false));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('automatic restarts were suspended');
+  });
+
+  it('coming back online clears the reason with the banner', () => {
+    render(<AgentOfflineBanner />);
+    act(() => useCinderpawStore.getState().setOffline(true, false, 'something specific'));
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+
+    act(() => useCinderpawStore.getState().setReady(true));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(useCinderpawStore.getState().offlineReason).toBeNull();
   });
 });

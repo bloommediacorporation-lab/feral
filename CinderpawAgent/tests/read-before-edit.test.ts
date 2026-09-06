@@ -188,3 +188,53 @@ describe("what the gate must NOT block", () => {
     expect(res.content).toContain("Unchanged");
   });
 });
+
+/**
+ * An empty `old_string` used to hang the sidecar.
+ *
+ * `indexOf("", n)` returns `n`, and the occurrence-counting loop advanced by
+ * `oldStr.length`, so the scan never moved: a tight synchronous loop on the
+ * thread that serves every other tool, with no timer, no cancel and no
+ * timeout. A truncated tool call from an ordinary model turn is enough to
+ * produce it, so this is reached by accident.
+ *
+ * The test is written with a real timeout because a regression here does not
+ * fail, it hangs the whole suite.
+ */
+describe("edit_file refuses an empty search string", () => {
+  test("an empty old_string is refused, and refused fast", async () => {
+    const f = join(tmp, "target.txt");
+    writeFileSync(f, "one\ntwo\nthree\n");
+    const ctx = ctxFor([tmp]);
+    // Satisfy the read-before-edit gate so the empty-string guard is what
+    // this test is actually measuring.
+    await createReadFileTool([tmp]).execute({ path: f }, ctx);
+
+    const started = Date.now();
+    const res = await createEditFileTool([tmp]).execute(
+      { path: f, old_string: "", new_string: "x" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("bad_args");
+    // The guard sits with the other argument checks, before the file is
+    // opened, so this is bounded by process startup and nothing else.
+    expect(Date.now() - started).toBeLessThan(2000);
+    // And the file is untouched.
+    expect(readFileSync(f, "utf8")).toBe("one\ntwo\nthree\n");
+  }, 10_000);
+
+  /** The negative: a normal edit must still work. */
+  test("a non-empty old_string still edits", async () => {
+    const f = join(tmp, "normal.txt");
+    writeFileSync(f, "one\ntwo\nthree\n");
+    const ctx = ctxFor([tmp]);
+    await createReadFileTool([tmp]).execute({ path: f }, ctx);
+    const res = await createEditFileTool([tmp]).execute(
+      { path: f, old_string: "two", new_string: "2" },
+      ctx,
+    );
+    expect(res.ok).toBe(true);
+    expect(readFileSync(f, "utf8")).toBe("one\n2\nthree\n");
+  });
+});

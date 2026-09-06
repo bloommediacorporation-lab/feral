@@ -84,6 +84,24 @@ export function createEditFileTool(allowedPaths: string[]): Tool {
       if (oldStr === newStr) {
         return { ok: false, content: "old_string and new_string are identical — nothing to do.", error: "no_op" };
       }
+      // An empty search string is not an unusual edit, it is a hang. The count
+      // loop below advances by `oldStr.length`, so `indexOf("", 0)` returns 0
+      // forever and the scan never moves — a tight synchronous loop with no
+      // timer, no cancel and no timeout, on the thread that serves every other
+      // tool. Ordinary model output produces it (a tool call whose arguments
+      // got truncated mid-JSON arrives here as `old_string: ""`), so this is
+      // reached by accident and not by attack. Refused with the other argument
+      // guards, before any file is opened.
+      if (oldStr === "") {
+        return {
+          ok: false,
+          content:
+            "edit_file needs a non-empty 'old_string' — it is the text to find. " +
+            "To add content to a file, include enough surrounding text to locate " +
+            "the insertion point, or use write_file for a new file.",
+          error: "bad_args",
+        };
+      }
 
       // Resolve the path under the fs:read permission. The write side will
       // be re-validated below — resolveAllowedPath throws on out-of-bounds.

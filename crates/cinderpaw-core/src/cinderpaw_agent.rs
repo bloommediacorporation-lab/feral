@@ -345,11 +345,21 @@ pub async fn spawn(
         // `CINDERPAW_FORCE_SIDECAR_BUILD=1 cargo tauri dev` to force a
         // rebuild, or invoke the script directly:
         //   node src-tauri/scripts/build-sidecar.mjs
+        // Two sentences for two different readers, installed one first. This
+        // string is shown to the person, not only logged: on an installed
+        // machine the usual cause is antivirus quarantining the sidecar or a
+        // half-unpacked package, and the previous text named a build script
+        // and a source tree that do not exist there — which reads as "this
+        // program is broken" with nothing to act on.
         concat!(
-            "cinderpaw-agent binary not found. ",
-            "The sidecar build script (src-tauri/scripts/build-sidecar.mjs) ",
-            "should have run as part of `cargo tauri dev/build`. ",
-            "Run it manually with: node src-tauri/scripts/build-sidecar.mjs"
+            "Agent mode could not start because the cinderpaw-agent program is missing. ",
+            "It ships alongside Cinderpaw, so this usually means antivirus quarantined it ",
+            "or the installation did not finish — check your antivirus quarantine, then ",
+            "reinstall Cinderpaw. ",
+            "(Running from source: the sidecar build script, ",
+            "src-tauri/scripts/build-sidecar.mjs, should have run as part of ",
+            "`cargo tauri dev/build`; run it manually with ",
+            "`node src-tauri/scripts/build-sidecar.mjs`.)"
         )
         .to_string()
     })?;
@@ -622,7 +632,11 @@ pub async fn spawn(
 ///     `STABLE_UPTIME_SECS` resets the failure streak (a crash after hours
 ///     of uptime shouldn't count against the boot-loop budget).
 ///   * After the budget is exhausted, gives up and emits a final
-///     `cinderpaw://agent-exit` with `restarting: false`.
+///     `cinderpaw://agent-exit` with `restarting: false` and an `error`
+///     sentence naming the last exit code and the log file. The supervisor
+///     task then ends; only an app restart brings Agent mode back.
+///   * Every `restarting: false` emission carries `error`. The frontend shows
+///     it verbatim, so this string is user-facing text, not a log line.
 ///
 /// The `Child` stays in `runtime.cinderpaw_agent_process` so app-exit kill-on-drop
 /// semantics are unchanged; the supervisor polls `try_wait()` through the
@@ -793,15 +807,41 @@ pub fn supervise(
                 }
             }
 
-            let backoff = if over_budget {
+            // Budget spent: stop, and say so. This used to reset the counter
+            // and sleep 30s instead, which meant the loop never ended and
+            // `restarting:false` was never emitted for a crash — so a machine
+            // where the sidecar can never stay up showed "going offline and
+            // restarting automatically" for the whole session, on a 30s cycle,
+            // and the honest screen written for exactly this case
+            // (AgentOfflineBanner's WifiOff branch) was unreachable code.
+            //
+            // Giving up is the right answer here and not a capitulation: a
+            // process that lived longer than STABLE_UPTIME_SECS resets the
+            // streak, so reaching this line means six consecutive failures with
+            // no run long enough to count as working. A seventh automatic
+            // attempt does not fix an antivirus quarantine, a corrupt database
+            // or a missing runtime — a sentence naming where to look does.
+            if over_budget {
                 tracing::error!(
-                    "cinderpaw-agent: {MAX_QUICK_FAILURES} rapid failures — cooling down 30s before retrying"
+                    "cinderpaw-agent: {MAX_QUICK_FAILURES} rapid failures — giving up until the app is restarted"
                 );
-                quick_failures = 0;
-                std::time::Duration::from_secs(30)
-            } else {
-                std::time::Duration::from_secs((2 * quick_failures as u64).min(10))
-            };
+                events.emit(
+                    "cinderpaw://agent-exit",
+                    serde_json::json!({
+                        "code": status.code(),
+                        "restarting": false,
+                        "error": format!(
+                            "Agent mode stopped after {MAX_QUICK_FAILURES} failed starts in a row \
+                             (last exit code: {}). Restart Cinderpaw to try again. If it keeps \
+                             happening, the reason is in the log at {}.",
+                            status.code().map(|c| c.to_string()).unwrap_or_else(|| "none".into()),
+                            crate::paths::cinderpaw_dir().join("logs").join("cinderpaw.log").display(),
+                        ),
+                    }),
+                );
+                return;
+            }
+            let backoff = std::time::Duration::from_secs((2 * quick_failures as u64).min(10));
             tokio::time::sleep(backoff).await;
         }
     });
