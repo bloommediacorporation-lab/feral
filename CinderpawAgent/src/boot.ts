@@ -870,6 +870,17 @@ export async function boot(transportOverride?: Transport) {
   registry.register(createCodeQualityTool("install_deps", config.workspaceRoots));
   registry.register(createCodeQualityTool("build_project", config.workspaceRoots));
 
+  // Say what the switch took away. Somebody who sets
+  // CINDERPAW_ENABLE_SHELL_EXEC=false and then finds git_status missing has no
+  // way to tell a working security control from a broken install, and the
+  // difference decides whether they trust the switch or work around it.
+  if (registry.withheldForShellExec.length > 0) {
+    log(
+      `CINDERPAW_ENABLE_SHELL_EXEC=false: ${registry.withheldForShellExec.length} tool(s) that run ` +
+        `programs were not registered: ${registry.withheldForShellExec.join(", ")}`,
+    );
+  }
+
   // ask_user — interactive questions (Claude.ai-style). No permissions;
   // pure event emission through the AskUserBridge in the tool context.
   registry.register(createAskUserTool());

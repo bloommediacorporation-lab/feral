@@ -30,6 +30,7 @@
 import type { EgressProxy } from "../egress/egress-proxy.ts";
 import type { AuditLog } from "../egress/audit-log.ts";
 import { validateManifest } from "../egress/tool-permissions.ts";
+import { readEnv } from "../config.ts";
 import type {
   AskUserBridge,
   DesktopControlBridge,
@@ -47,6 +48,16 @@ import type {
 } from "../types.ts";
 import type { ToolObservationLog } from "../telemetry/tool-observations.ts";
 import { CircuitBreaker } from "../egress/circuit-breaker.ts";
+
+/**
+ * Is process execution switched off?
+ *
+ * Read per call rather than cached at import: tests flip it, and a value frozen
+ * at module load makes a security switch depend on import order.
+ */
+function spawnDisabled(): boolean {
+  return readEnv("CINDERPAW_ENABLE_SHELL_EXEC") === "false";
+}
 
 export class ToolRegistry {
   readonly #tools = new Map<string, Tool>();
@@ -221,13 +232,42 @@ export class ToolRegistry {
   }
 
   /** Register a tool after validating its manifest. Throws on bad manifests. */
+  readonly #withheld: string[] = [];
+
   register(tool: Tool): void {
     validateManifest(tool.manifest);
     if (this.#tools.has(tool.manifest.name)) {
       throw new Error(`tool "${tool.manifest.name}" already registered`);
     }
+    // CINDERPAW_ENABLE_SHELL_EXEC=false means no process execution, and it has
+    // to mean that here rather than at each registration site. It was written
+    // as an `if` around two registrations in boot.ts, so the ten tools added
+    // later outside it kept running programs with the switch off: the five
+    // code-quality tools (whose own docstring says "same security model as
+    // shell_exec") and the five git tools, under a comment that literally
+    // reads "process-spawn tools for the workspace". Ten tools, one forgotten
+    // `if`, and a promise in PROMISES.md that did not hold.
+    //
+    // The manifest already declares what a tool does. Gating on that instead of
+    // on where somebody remembered to put a brace is the difference between a
+    // switch that works and a switch that works until the next tool.
+    if (spawnDisabled() && tool.manifest.permissions.includes("process:spawn")) {
+      this.#withheld.push(tool.manifest.name);
+      return;
+    }
     this.#tools.set(tool.manifest.name, tool);
     this.#version++;
+  }
+
+  /**
+   * Tools refused because process execution is switched off.
+   *
+   * Read by boot so the reason lands on the operator's screen. A security
+   * control that silently removes half the tool surface teaches people the
+   * product is broken; one that says what it withheld teaches them it works.
+   */
+  get withheldForShellExec(): readonly string[] {
+    return this.#withheld;
   }
 
   has(name: string): boolean {
