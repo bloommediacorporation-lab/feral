@@ -436,7 +436,7 @@ mod tests {
     fn audio_still_attached_to_a_saved_conversation_is_reported_as_in_use() {
         let dir = tmp();
         save_to_dir(&dir, "c1", "kept", &[voice_msg("/somewhere/else/aaa-111.webm")], None).unwrap();
-        save_to_dir(&dir, "c2", "also kept", &[voice_msg("C:\Users\d\voice\bbb-222.ogg")], None).unwrap();
+        save_to_dir(&dir, "c2", "also kept", &[voice_msg(r"C:\Users\d\voice\bbb-222.ogg")], None).unwrap();
         save_to_dir(&dir, "c3", "no voice here", &msgs(2), None).unwrap();
 
         let names = referenced_audio_names_in_dir(&dir).unwrap();

@@ -275,8 +275,13 @@ pub fn run() {
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
         .with_ansi(false)
         .with_writer(move || -> Box<dyn std::io::Write> {
-            if let Some(home) = std::env::var_os("USERPROFILE") {
-                let dir = std::path::Path::new(&home).join(".cinderpaw").join("logs");
+            // `dirs::home_dir()`, not `USERPROFILE`: that variable exists only on
+            // Windows, so every macOS and Linux desktop user had no log file at
+            // all — and a GUI process has no visible stdout to fall back to, so
+            // the reason for anything going wrong landed nowhere on two of the
+            // three platforms we ship.
+            if let Some(home) = dirs::home_dir() {
+                let dir = home.join(cinderpaw_core::brand::APP_HOME_DIR_NAME).join("logs");
                 if std::fs::create_dir_all(&dir).is_ok() {
                     if let Ok(f) = std::fs::OpenOptions::new()
                         .create(true)
