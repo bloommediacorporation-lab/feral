@@ -35,7 +35,13 @@ const PATH_SHAPES = [
   /\b[A-Za-z]:[\\/][^\s"'`,;)]+/g, // Windows absolute
   /(?<![\w:])\/(?:[\w.-]+\/)+[\w.-]+/g, // POSIX absolute with at least one directory
   /\b[\w.-]+[\\/][\w.-]+(?:[\\/][\w.-]+)*\.\w{1,5}\b/g, // relative with a separator and extension
-  /\b[\w-]+\.(?:ts|tsx|js|jsx|json|md|py|rs|go|toml|yaml|yml|sh|ps1|txt|sql|html|css)\b/g,
+  // Bare filename, with two rules that only matter once something STATS the
+  // result instead of merely warning about it. The lookbehind stops a name
+  // being harvested out of the middle of a longer path already matched above
+  // (`report.md` from `docs/report.md`), and the dotted middle keeps a
+  // multi-part name whole (`mod.test.ts`, not `test.ts`). Getting either wrong
+  // produces a path that is missing from disk because it was never the name.
+  /(?<![\w./\\-])[\w-]+(?:\.[\w-]+)*\.(?:ts|tsx|js|jsx|json|md|py|rs|go|toml|yaml|yml|sh|ps1|txt|sql|html|css)\b/g,
 ];
 
 /**
@@ -45,13 +51,30 @@ const PATH_SHAPES = [
  * file" without re-deriving the shapes.
  */
 export function claimedPath(answer: string): string | null {
+  return claimedPaths(answer)[0] ?? null;
+}
+
+/**
+ * EVERY distinct file path an answer claims, in the order they appear.
+ *
+ * `claimedPath` answers "is this answer about a file"; the Daemon gate
+ * (`core/daemon.ts`) needs all of them, because "I created the module and its
+ * test" is two claims and checking only the first lets the second one through.
+ * Same shapes, same quoted-material rules — deliberately one implementation, so
+ * a path the warning ignores is a path the gate ignores too.
+ */
+export function claimedPaths(answer: string): string[] {
   const prose = withoutQuotedMaterial(answer);
+  const found: string[] = [];
   for (const shape of PATH_SHAPES) {
     shape.lastIndex = 0;
-    const match = prose.match(shape);
-    if (match?.[0]) return match[0];
+    for (const match of prose.match(shape) ?? []) {
+      // Trailing sentence punctuation is prose, not part of the name.
+      const cleaned = match.replace(/[.,;:)\]}'"`]+$/, "");
+      if (cleaned && !found.includes(cleaned)) found.push(cleaned);
+    }
   }
-  return null;
+  return found;
 }
 
 /** Shared by both detectors, so they never disagree about what the agent said. */

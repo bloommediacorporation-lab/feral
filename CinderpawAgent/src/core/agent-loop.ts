@@ -48,6 +48,7 @@ import type { MemoryExtractor } from "../memory/extractor.ts";
 import { WorkingMemory } from "../memory/working.ts";
 import { countTokens } from "./tokenizer.ts";
 import { claimedPath, unsourcedWarning, withOpenFirst } from "./unsourced.ts";
+import { daemonNotice, daemonPrompt, unkeptWriteClaims } from "./daemon.ts";
 import { stripPrivate, redactSecrets } from "../memory/privacy.ts";
 import { isRestrictedSession, markSessionRestricted } from "./session-visibility.ts";
 import type { BrainStack } from "../brain/brain-stack.ts";
@@ -1520,6 +1521,8 @@ export class AgentLoop {
     // ever reasons can't loop forever.
     const MAX_CONTINUATIONS = 4;
     let continuations = 0;
+    // One Daemon reflection per turn. See the gate at natural termination.
+    let daemonReflections = 0;
     // Malformed tool-call recovery: when a turn contains a tool-call attempt
     // that failed to parse (corrupted JSON like `{"name="read_skill">`),
     // the model meant to act — ending the turn there strands the task. Feed
@@ -1879,7 +1882,49 @@ export class AgentLoop {
         // Natural termination — model chose to answer rather than call a tool.
         // Prepend any length-cutoff fragments so the persisted answer matches
         // the full text the user watched stream into the bubble.
-        return { text: [...answerParts, answer].join(""), toolCallCount, outcome: "completed" };
+        const finalText = [...answerParts, answer].join("");
+
+        // The Daemon gate. "Completed" is the agent's opinion; a file being on
+        // disk is not. `done_when` already established that the world wins over
+        // the claim, but it only ever runs where somebody DECLARED an assertion
+        // — the cron API, the UI, or a person typing `done_when:` into a chat
+        // message — so for the person who just installed this and asked a
+        // question, it has never once fired. This is the assertion nobody has to
+        // declare: if the answer says it wrote a file, the file has to exist.
+        //
+        // Placed here rather than in `unattended.ts` (which has its own
+        // run-level check) because every caller terminates through this line:
+        // interactive turns, connectors, cron and subagents all get it from one
+        // guard instead of four.
+        //
+        // Only after tools ran: a turn that called nothing cannot have written
+        // anything, and `unsourced.ts` already owns that case. One reflection,
+        // not four — a model that repeats the claim after being shown the empty
+        // directory will keep repeating it, and the person is better served by
+        // being told than by paying for a third round.
+        if (toolCallCount > 0 && daemonReflections === 0) {
+          const missing = await unkeptWriteClaims(finalText);
+          if (missing.length > 0) {
+            daemonReflections++;
+            memory.addAssistant(stripThinking(completion));
+            memory.addUser(daemonPrompt(missing));
+            continue;
+          }
+        }
+        // The reflection landed in a transcript nobody reads. If it did not take,
+        // the person is about to be handed an answer we have already proved
+        // wrong, so the reason goes on their screen in their own window.
+        if (toolCallCount > 0 && daemonReflections > 0) {
+          const stillMissing = await unkeptWriteClaims(finalText);
+          if (stillMissing.length > 0) {
+            return {
+              text: `${finalText}\n\n${daemonNotice(stillMissing)}`,
+              toolCallCount,
+              outcome: "completed",
+            };
+          }
+        }
+        return { text: finalText, toolCallCount, outcome: "completed" };
       }
 
       // Model called tools → process them, then loop for the next turn.
